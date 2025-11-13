@@ -8,8 +8,9 @@ venv/
 env/
 .env
 
-# Streamlit
+# Streamlit - IMPORTANT: Ne jamais commiter les secrets!
 .streamlit/secrets.toml
+.streamlit/config.toml
 
 # macOS
 .DS_Store
@@ -20,3 +21,7 @@ docker-compose.yml
 
 # Backups
 *.backup*
+
+# Fichiers temporaires
+*.tmp
+*.log

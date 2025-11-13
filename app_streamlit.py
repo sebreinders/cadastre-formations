@@ -5,8 +5,71 @@ import plotly.graph_objects as go
 import numpy as np
 import json
 from collections import Counter
+import bcrypt
 
 st.set_page_config(page_title="Cadastre des formations TIC — Tableau interactif", layout="wide")
+
+# ==============================================================================
+# AUTHENTIFICATION
+# ==============================================================================
+
+# Initialiser session_state
+if 'authenticated' not in st.session_state:
+    st.session_state.authenticated = False
+if 'username' not in st.session_state:
+    st.session_state.username = None
+if 'name' not in st.session_state:
+    st.session_state.name = None
+
+def check_password(username, password):
+    """Vérifie le mot de passe hashé"""
+    if "users" not in st.secrets or username not in st.secrets["users"]:
+        return False
+    
+    stored_hash = st.secrets["users"][username]["password"]
+    return bcrypt.checkpw(password.encode('utf-8'), stored_hash.encode('utf-8'))
+
+def login():
+    """Affiche le formulaire de connexion"""
+    st.title("🔐 Connexion")
+    st.markdown("---")
+    
+    with st.form("login_form"):
+        st.info("**Application protégée** - Veuillez vous connecter pour accéder au contenu")
+        username = st.text_input("Nom d'utilisateur")
+        password = st.text_input("Mot de passe", type="password")
+        submit = st.form_submit_button("Se connecter")
+        
+        if submit:
+            if check_password(username, password):
+                st.session_state.authenticated = True
+                st.session_state.username = username
+                st.session_state.name = st.secrets["users"][username]["name"]
+                st.rerun()
+            else:
+                st.error("Nom d'utilisateur ou mot de passe incorrect")
+
+def logout():
+    """Déconnexion"""
+    st.session_state.authenticated = False
+    st.session_state.username = None
+    st.session_state.name = None
+    st.rerun()
+
+# Vérifier l'authentification
+if not st.session_state.authenticated:
+    login()
+    st.stop()
+
+# Afficher les infos utilisateur dans sidebar
+st.sidebar.success(f'Connecté en tant que: **{st.session_state.name}**')
+if st.sidebar.button("🚪 Déconnexion"):
+    logout()
+st.sidebar.markdown("---")
+
+# ==============================================================================
+# APPLICATION PRINCIPALE (code existant ci-dessous)
+# ==============================================================================
 
 # Configuration des provinces wallonnes avec coordonnées approximatives
 PROVINCES_WALLONNES = {
