@@ -1,0 +1,12 @@
+version: "3.9"
+services:
+  cadastre:
+    build: .
+    container_name: cadastre_formations
+    ports:
+      - "8501:8501"
+    volumes:
+      - ./data:/app/data
+    environment:
+      - DEFAULT_CSV=/data/formations_avec_in_scope.csv
+    restart: unless-stopped
