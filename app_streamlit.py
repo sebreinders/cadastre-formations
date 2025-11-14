@@ -31,7 +31,7 @@ def check_password(username, password):
 
 def login():
     """Affiche le formulaire de connexion"""
-    st.title("🔐 Connexion")
+    st.title("Connexion")
     st.markdown("---")
     
     with st.form("login_form"):
@@ -89,6 +89,24 @@ VILLES_PROVINCES = {
 }
 
 @st.cache_data
+def load_postal_codes() -> pd.DataFrame:
+    """Charge les données des codes postaux belges"""
+    try:
+        # Essayer différents encodages
+        for encoding in ['utf-8', 'latin-1', 'iso-8859-1', 'cp1252']:
+            try:
+                postal_df = pd.read_csv('data/postal-codes-belgium.csv', sep=';', encoding=encoding)
+                postal_df.columns = [c.strip() for c in postal_df.columns]
+                return postal_df
+            except UnicodeDecodeError:
+                continue
+        st.warning("Impossible de charger les codes postaux: problème d'encodage")
+        return pd.DataFrame()
+    except Exception as e:
+        st.warning(f"Impossible de charger les codes postaux: {e}")
+        return pd.DataFrame()
+
+@st.cache_data
 def load_data(path: str) -> pd.DataFrame:
     """Charge les données CSV avec le bon séparateur et nettoie les colonnes"""
     try:
@@ -124,6 +142,65 @@ def load_data(path: str) -> pd.DataFrame:
     except Exception as e:
         st.error(f"Erreur de chargement: {e}")
         raise
+
+def enrich_with_geo_data(df: pd.DataFrame, postal_df: pd.DataFrame) -> pd.DataFrame:
+    """Enrichit les données avec les informations géographiques des codes postaux"""
+    if postal_df.empty or 'localisation_potentielle' not in df.columns:
+        return df
+    
+    # Normaliser le nom de ville dans les formations
+    df['ville_normalized'] = df['localisation_potentielle'].str.strip().str.lower()
+    
+    # Créer une table de lookup depuis les codes postaux
+    postal_lookup = postal_df[['Municipality name (French)', 
+                                'Arrondissement name (French)', 
+                                'Province name (French)', 
+                                '_Geo Point']].copy()
+    postal_lookup.columns = ['ville', 'arrondissement', 'province_geo', 'geo_point']
+    
+    # Normaliser les noms de villes dans le fichier postal
+    postal_lookup['ville_normalized'] = postal_lookup['ville'].str.strip().str.lower()
+    
+    # Prendre la première occurrence de chaque ville (avec ses coordonnées moyennes si multiples)
+    postal_grouped = postal_lookup.groupby('ville_normalized').agg({
+        'ville': 'first',
+        'arrondissement': 'first',
+        'province_geo': 'first',
+        'geo_point': 'first'
+    }).reset_index()
+    
+    # Faire le merge sur le nom de ville normalisé
+    df = df.merge(postal_grouped, on='ville_normalized', how='left')
+    
+    # Nettoyer la colonne temporaire
+    df = df.drop('ville_normalized', axis=1)
+    
+    # Parser les coordonnées GPS
+    def parse_geo_point(geo):
+        if pd.isna(geo):
+            return None, None
+        try:
+            parts = str(geo).split(',')
+            if len(parts) == 2:
+                return float(parts[0].strip()), float(parts[1].strip())
+        except:
+            pass
+        return None, None
+    
+    df[['latitude', 'longitude']] = df['geo_point'].apply(
+        lambda x: pd.Series(parse_geo_point(x))
+    )
+    
+    # Utiliser province_geo si province manquante ou "Non spécifié"
+    if 'province' in df.columns:
+        df['province'] = df.apply(
+            lambda row: row['province_geo'] if (pd.isna(row['province']) or row['province'] == 'Non spécifié') and pd.notna(row['province_geo']) else row['province'],
+            axis=1
+        )
+    else:
+        df['province'] = df['province_geo']
+    
+    return df
 
 def extract_province(localisation):
     """Extrait la province depuis la localisation"""
@@ -162,11 +239,11 @@ def parse_duree(duree_str):
     if 'année' in duree or 'an' in duree:
         return nb * 1000  # Approximation
     elif 'mois' in duree:
-        return nb * 160
+        return nb * 120
     elif 'semaine' in duree:
-        return nb * 40
+        return nb * 35
     elif 'jour' in duree or 'journée' in duree:
-        return nb * 8
+        return nb * 7
     elif 'heure' in duree or 'h' in duree:
         return nb
     
@@ -180,6 +257,10 @@ path = uploaded if uploaded is not None else default_path
 
 try:
     data = load_data(path)
+    # Charger les codes postaux et enrichir les données
+    postal_data = load_postal_codes()
+    if not postal_data.empty:
+        data = enrich_with_geo_data(data, postal_data)
 except Exception as e:
     st.error(f"Impossible de charger le fichier: {e}")
     st.stop()
@@ -276,76 +357,253 @@ st.markdown("---")
 # LAYOUT PRINCIPAL
 tab1, tab2, tab3, tab4, tab5 = st.tabs(["Carte des Provinces", "Analyses", "Graphiques Avancés", "Données", "Cards"])
 
-# TAB 1: CARTE DES PROVINCES
+# TAB 1: CARTE GÉOGRAPHIQUE
 with tab1:
-    st.subheader("Répartition géographique des formations par province")
+    st.subheader("Répartition géographique des formations")
     
-    if colmap["province"]:
-        # Comptage par province
-        province_counts = df[colmap["province"]].value_counts().reset_index()
-        province_counts.columns = ['province', 'count']
-        province_counts = province_counts[province_counts['province'] != 'Non spécifié']
-        
-        # Création de la carte avec Plotly
-        fig_map = go.Figure()
-        
-        for _, row in province_counts.iterrows():
-            prov = row['province']
-            count = row['count']
-            if prov in PROVINCES_WALLONNES:
-                coords = PROVINCES_WALLONNES[prov]
-                fig_map.add_trace(go.Scattermapbox(
-                    lat=[coords['lat']],
-                    lon=[coords['lon']],
-                    mode='markers+text',
-                    marker=dict(size=count/5 + 20, color=coords['color'], opacity=0.7),
-                    text=f"{prov}",
-                    textposition="top center",
-                    hovertemplate=f"<b>{prov}</b><br>{count} formations<extra></extra>",
-                    name=prov
-                ))
-        
-        fig_map.update_layout(
-            mapbox=dict(
-                style="open-street-map",
-                center=dict(lat=50.5, lon=4.8),
-                zoom=7
-            ),
-            height=600,
-            showlegend=True,
-            margin={"r":0,"t":0,"l":0,"b":0}
-        )
-        
-        st.plotly_chart(fig_map, use_container_width=True)
-        
-        # Graphique en barres des provinces
-        col_map_left, col_map_right = st.columns(2)
-        
-        with col_map_left:
-            fig_prov_bar = px.bar(
-                province_counts.sort_values('count', ascending=True),
-                x='count',
-                y='province',
-                orientation='h',
-                title="Nombre de formations par province",
-                color='province',
-                color_discrete_map={p: PROVINCES_WALLONNES[p]['color'] for p in PROVINCES_WALLONNES}
+    # Sélecteur de niveau géographique
+    vue_geo = st.radio(
+        "Niveau de détail :",
+        options=["Province", "Arrondissement", "Ville"],
+        horizontal=True,
+        key="vue_geographique"
+    )
+    
+    if vue_geo == "Province":
+        # VUE PAR PROVINCE (code existant)
+        if colmap["province"]:
+            province_counts = df[colmap["province"]].value_counts().reset_index()
+            province_counts.columns = ['province', 'count']
+            province_counts = province_counts[province_counts['province'] != 'Non spécifié']
+            
+            fig_map = go.Figure()
+            
+            for _, row in province_counts.iterrows():
+                prov = row['province']
+                count = row['count']
+                if prov in PROVINCES_WALLONNES:
+                    coords = PROVINCES_WALLONNES[prov]
+                    fig_map.add_trace(go.Scattermapbox(
+                        lat=[coords['lat']],
+                        lon=[coords['lon']],
+                        mode='markers+text',
+                        marker=dict(size=count/5 + 20, color=coords['color'], opacity=0.7),
+                        text=f"{prov}",
+                        textposition="top center",
+                        hovertemplate=f"<b>{prov}</b><br>{count} formations<extra></extra>",
+                        name=prov
+                    ))
+            
+            fig_map.update_layout(
+                mapbox=dict(
+                    style="open-street-map",
+                    center=dict(lat=50.5, lon=4.8),
+                    zoom=7
+                ),
+                height=600,
+                showlegend=True,
+                margin={"r":0,"t":0,"l":0,"b":0}
             )
-            fig_prov_bar.update_layout(showlegend=False, height=400)
-            st.plotly_chart(fig_prov_bar, use_container_width=True)
-        
-        with col_map_right:
-            # Pie chart
-            fig_prov_pie = px.pie(
-                province_counts,
-                values='count',
-                names='province',
-                title="Répartition en % par province",
-                color='province',
-                color_discrete_map={p: PROVINCES_WALLONNES[p]['color'] for p in PROVINCES_WALLONNES}
-            )
-            fig_prov_pie.update_layout(height=400)
-            st.plotly_chart(fig_prov_pie, use_container_width=True)
+            
+            st.plotly_chart(fig_map, use_container_width=True)
+            
+            col_map_left, col_map_right = st.columns(2)
+            
+            with col_map_left:
+                fig_prov_bar = px.bar(
+                    province_counts.sort_values('count', ascending=True),
+                    x='count',
+                    y='province',
+                    orientation='h',
+                    title="Nombre de formations par province",
+                    color='province',
+                    color_discrete_map={p: PROVINCES_WALLONNES[p]['color'] for p in PROVINCES_WALLONNES}
+                )
+                fig_prov_bar.update_layout(showlegend=False, height=400)
+                st.plotly_chart(fig_prov_bar, use_container_width=True)
+            
+            with col_map_right:
+                fig_prov_pie = px.pie(
+                    province_counts,
+                    values='count',
+                    names='province',
+                    title="Répartition en % par province",
+                    color='province',
+                    color_discrete_map={p: PROVINCES_WALLONNES[p]['color'] for p in PROVINCES_WALLONNES}
+                )
+                fig_prov_pie.update_layout(height=400)
+                st.plotly_chart(fig_prov_pie, use_container_width=True)
+    
+    elif vue_geo == "Arrondissement":
+        # VUE PAR ARRONDISSEMENT
+        if 'arrondissement' in df.columns:
+            arr_data = df[df['arrondissement'].notna()].copy()
+            
+            if len(arr_data) > 0:
+                # Agrégation par arrondissement avec coordonnées moyennes et comptage
+                arr_grouped = arr_data.groupby('arrondissement').agg({
+                    'latitude': 'mean',
+                    'longitude': 'mean',
+                    'province': 'first',
+                    'localisation_potentielle': 'count'  # Comptage correct
+                }).reset_index()
+                arr_grouped.rename(columns={'localisation_potentielle': 'count'}, inplace=True)
+                
+                # Carte avec markers
+                fig_arr_map = go.Figure()
+                
+                for _, row in arr_grouped.iterrows():
+                    if pd.notna(row['latitude']) and pd.notna(row['longitude']):
+                        province = row['province'] if pd.notna(row['province']) else 'Non spécifié'
+                        color = PROVINCES_WALLONNES.get(province, {}).get('color', '#636EFA')
+                        
+                        fig_arr_map.add_trace(go.Scattermapbox(
+                            lat=[row['latitude']],
+                            lon=[row['longitude']],
+                            mode='markers+text',
+                            marker=dict(size=row['count']/3 + 15, color=color, opacity=0.7),
+                            text=row['arrondissement'],
+                            textposition="top center",
+                            textfont=dict(size=9),
+                            hovertemplate=f"<b>{row['arrondissement']}</b><br>" +
+                                        f"Province: {province}<br>" +
+                                        f"{row['count']} formations<extra></extra>",
+                            name=row['arrondissement']
+                        ))
+                
+                fig_arr_map.update_layout(
+                    mapbox=dict(
+                        style="open-street-map",
+                        center=dict(lat=50.5, lon=4.8),
+                        zoom=7.5
+                    ),
+                    height=600,
+                    showlegend=False,
+                    margin={"r":0,"t":0,"l":0,"b":0}
+                )
+                
+                st.plotly_chart(fig_arr_map, use_container_width=True)
+                
+                # Graphiques complémentaires
+                col_arr_left, col_arr_right = st.columns(2)
+                
+                with col_arr_left:
+                    # Top 15 arrondissements
+                    top_arr = arr_grouped.nlargest(15, 'count')
+                    fig_arr_bar = px.bar(
+                        top_arr.sort_values('count', ascending=True),
+                        x='count',
+                        y='arrondissement',
+                        orientation='h',
+                        title="Top 15 arrondissements",
+                        color='province',
+                        color_discrete_map={p: PROVINCES_WALLONNES[p]['color'] for p in PROVINCES_WALLONNES}
+                    )
+                    fig_arr_bar.update_layout(height=400)
+                    st.plotly_chart(fig_arr_bar, use_container_width=True)
+                
+                with col_arr_right:
+                    # Distribution par province dans les arrondissements
+                    arr_prov = arr_data.groupby(['province', 'arrondissement']).size().reset_index(name='count')
+                    fig_arr_prov = px.bar(
+                        arr_prov,
+                        x='province',
+                        y='count',
+                        color='arrondissement',
+                        title="Arrondissements par province",
+                        barmode='stack'
+                    )
+                    fig_arr_prov.update_layout(height=400, showlegend=False)
+                    st.plotly_chart(fig_arr_prov, use_container_width=True)
+            else:
+                st.warning("Aucune donnée d'arrondissement disponible pour les formations filtrées.")
+        else:
+            st.warning("Les données d'arrondissement ne sont pas disponibles. Chargez le fichier des codes postaux.")
+    
+    else:  # vue_geo == "Ville"
+        # VUE PAR VILLE
+        if 'ville' in df.columns:
+            ville_data = df[df['ville'].notna()].copy()
+            
+            if len(ville_data) > 0:
+                # Agrégation par ville avec coordonnées moyennes
+                ville_grouped = ville_data.groupby('ville').agg({
+                    'latitude': 'mean',
+                    'longitude': 'mean',
+                    'province': 'first',
+                    'arrondissement': 'first'
+                }).reset_index()
+                # Compter correctement les formations par ville
+                ville_counts = ville_data.groupby('ville').size().reset_index(name='count')
+                ville_grouped = ville_grouped.merge(ville_counts, on='ville')
+                
+                # Filtrer les 50 villes principales pour la lisibilité
+                ville_grouped = ville_grouped.nlargest(50, 'count')
+                
+                # Carte avec markers
+                fig_ville_map = go.Figure()
+                
+                for _, row in ville_grouped.iterrows():
+                    if pd.notna(row['latitude']) and pd.notna(row['longitude']):
+                        province = row['province'] if pd.notna(row['province']) else 'Non spécifié'
+                        color = PROVINCES_WALLONNES.get(province, {}).get('color', '#636EFA')
+                        
+                        fig_ville_map.add_trace(go.Scattermapbox(
+                            lat=[row['latitude']],
+                            lon=[row['longitude']],
+                            mode='markers',
+                            marker=dict(size=row['count']/2 + 8, color=color, opacity=0.7),
+                            text=row['ville'],
+                            hovertemplate=f"<b>{row['ville']}</b><br>" +
+                                        f"Arrondissement: {row['arrondissement']}<br>" +
+                                        f"Province: {province}<br>" +
+                                        f"{row['count']} formations<extra></extra>",
+                            name=row['ville']
+                        ))
+                
+                fig_ville_map.update_layout(
+                    mapbox=dict(
+                        style="open-street-map",
+                        center=dict(lat=50.5, lon=4.8),
+                        zoom=8
+                    ),
+                    height=600,
+                    showlegend=False,
+                    margin={"r":0,"t":0,"l":0,"b":0}
+                )
+                
+                st.plotly_chart(fig_ville_map, use_container_width=True)
+                
+                st.info(f"📍 Affichage des 50 principales villes (sur {ville_data['ville'].nunique()} villes au total)")
+                
+                # Graphiques complémentaires
+                col_ville_left, col_ville_right = st.columns(2)
+                
+                with col_ville_left:
+                    # Top 20 villes
+                    top_villes = ville_grouped.head(20)
+                    fig_ville_bar = px.bar(
+                        top_villes.sort_values('count', ascending=True),
+                        x='count',
+                        y='ville',
+                        orientation='h',
+                        title="Top 20 villes",
+                        color='province',
+                        color_discrete_map={p: PROVINCES_WALLONNES[p]['color'] for p in PROVINCES_WALLONNES}
+                    )
+                    fig_ville_bar.update_layout(height=500)
+                    st.plotly_chart(fig_ville_bar, use_container_width=True)
+                
+                with col_ville_right:
+                    # Tableau des principales villes
+                    st.markdown("**Principales villes**")
+                    tableau_villes = ville_grouped[['ville', 'arrondissement', 'province', 'count']].head(20)
+                    tableau_villes.columns = ['Ville', 'Arrondissement', 'Province', 'Formations']
+                    st.dataframe(tableau_villes, use_container_width=True, height=465)
+            else:
+                st.warning("Aucune donnée de ville disponible pour les formations filtrées.")
+        else:
+            st.warning("Les données de ville ne sont pas disponibles. Chargez le fichier des codes postaux.")
 
 # TAB 2: ANALYSES
 with tab2:
@@ -572,7 +830,7 @@ with tab5:
         
         # Afficher la carte
         st.markdown(f"""
-        <div style='background-color: #f0f2f6; padding: 30px; border-radius: 10px; border-left: 5px solid #1f77b4;'>
+        <div style='background-color: #f0f2f6; padding: 15px; border-radius: 10px; border-left: 5px solid #1f77b4;'>
             <h2 style='color: #1f77b4; margin-top: 0;'>{current_formation.get(colmap['intitule'], 'N/A') if colmap['intitule'] else 'Formation'}</h2>
         </div>
         """, unsafe_allow_html=True)
@@ -658,4 +916,4 @@ with tab5:
             st.rerun()
 
 st.markdown("---")
-st.caption("Cadastre des formations TIC en Wallonie | Filtrez par province, organisme, durée et plus encore")
+st.caption("Cadastre - Beta - des formations TIC en Wallonie | Filtre par province, organisme, durée, ...")

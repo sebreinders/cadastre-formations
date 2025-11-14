@@ -25,3 +25,10 @@ docker-compose.yml
 # Fichiers temporaires
 *.tmp
 *.log
+
+#fichiers de backup
+.backup
+
+#Fichiers CSV de sources
+sources/*.csv
+

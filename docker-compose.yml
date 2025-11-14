@@ -7,6 +7,8 @@ services:
       - "8501:8501"
     volumes:
       - ./data:/app/data
+      - ./app_streamlit.py:/app/app_streamlit.py
+      - ./.streamlit:/app/.streamlit
     environment:
       - DEFAULT_CSV=/data/formations_avec_in_scope.csv
     restart: unless-stopped
